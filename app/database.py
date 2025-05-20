@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import couchdb
 import logging
 
-from app.exceptions import ServiceError, TeamNotFoundError
+from app.exceptions import DatabaseError, ServiceError, TeamNotFoundError
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -792,4 +792,82 @@ class Database:
             log.error(f"❌ Error finding teams for user {user_id}: {e}", exc_info=True) # Use log
             return []
 
+
+    # Add this method inside your `Database` class in app/database.py
+
+    def delete_team(self, team_id_to_delete: str) -> bool:
+        """
+        Deletes a team document from CouchDB.
+        Also handles unsetting the 'isLead' status for the team's lead if they
+        are no longer leading any other teams.
+
+        Args:
+            team_id_to_delete (str): The ID of the team document to delete.
+
+        Returns:
+            bool: True if deletion was successful, False otherwise.
+
+        Raises:
+            TeamNotFoundError: If the team document is not found.
+            DatabaseError: For other unexpected database issues during deletion.
+        """
+        if not self.db:
+            log.error("Database not connected. Cannot delete team.")
+            # Or raise DatabaseError("Database not connected.")
+            return False
+
+        log.info(f"Attempting to delete team with ID: {team_id_to_delete}")
+        try:
+            team_doc = self.db.get(team_id_to_delete) # Fetch the document first
+
+            if not team_doc:
+                log.warning(f"Team document with ID {team_id_to_delete} not found for deletion.")
+                raise TeamNotFoundError(f"Team with ID {team_id_to_delete} not found.")
+            
+            if team_doc.get("type") != "team":
+                log.warning(f"Document {team_id_to_delete} found, but it is not of type 'team'. Will not delete.")
+                # Or raise a more specific error, or just return False
+                return False
+
+            lead_id = team_doc.get("lead_id") # Get lead_id before deleting
+
+            # Delete the team document using the fetched document object
+            # This implicitly uses the document's _id and _rev
+            self.db.delete(team_doc)
+            log.info(f"Successfully deleted team document {team_id_to_delete}.")
+
+            # After successful deletion, check and update the former lead's status
+            if lead_id:
+                log.info(f"Checking lead status for former lead {lead_id} of deleted team {team_id_to_delete}.")
+                try:
+                    # Check if this user is still a lead of ANY OTHER team
+                    is_still_a_lead_elsewhere = self.is_user_leading_any_team(lead_id)
+                    if not is_still_a_lead_elsewhere:
+                        log.info(f"Former lead {lead_id} is no longer leading any teams. Setting isLead=False.")
+                        update_success = self.set_user_lead_status(lead_id, False)
+                        if not update_success:
+                            log.error(f"Failed to update lead status for user {lead_id} after team {team_id_to_delete} deletion. Continuing anyway.")
+                            # This part is not critical for team deletion success, so don't fail the whole operation
+                    else:
+                        log.info(f"Former lead {lead_id} is still leading other teams. No status change needed.")
+                except Exception as e_lead_update:
+                    log.error(f"Error during lead status update for user {lead_id} after team deletion: {e_lead_update}", exc_info=True)
+                    # Log error but don't let it fail the team deletion
+
+            # TODO: Consider if deleting a team should also:
+            # 1. Remove users from this team's user_ids list (already done by deleting the team doc).
+            # 2. Delete associated projects/tasks for this team (this would require more logic).
+            # 3. Update access control documents if they refer to this team.
+
+            return True
+
+        except couchdb.ResourceNotFound:
+            # This might be redundant if the initial self.db.get() already handles it,
+            # but good as a specific catch if delete itself fails due to prior modification.
+            log.warning(f"Team document {team_id_to_delete} not found (ResourceNotFound during delete operation).")
+            raise TeamNotFoundError(f"Team with ID {team_id_to_delete} not found during delete operation.")
+        except Exception as e:
+            log.error(f"❌ Unexpected error deleting team {team_id_to_delete}: {e}", exc_info=True)
+            # You might want to raise a more specific DatabaseError or wrap the original exception
+            raise DatabaseError(f"An unexpected error occurred while deleting team {team_id_to_delete}: {str(e)}") from e
 # --- End of Database Class ---

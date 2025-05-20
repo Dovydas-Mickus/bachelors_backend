@@ -6,7 +6,6 @@ from flask_jwt_extended import (
 )
 from werkzeug.exceptions import BadRequest, Unauthorized, NotFound
 
-# Assuming you create an AuthService in app/services/auth_service.py
 from app.services.auth_service import auth_service
 from app.utils.audit import audit_event
 from app.utils.helpers import get_current_user_doc_and_id
@@ -14,7 +13,7 @@ from app.utils.helpers import get_current_user_doc_and_id
 auth_bp = Blueprint('auth', __name__, url_prefix='/auth')
 
 @auth_bp.route("/register", methods=["POST"])
-@audit_event("register_user") # Typically public, audit logs attempt
+@audit_event("register_user")
 def register():
     data = request.json
     required_fields = ["first_name", "last_name", "email", "password", "role"]
@@ -70,25 +69,21 @@ def login():
         return response
 
     except Unauthorized as e:
-        # Audit log will capture 'denied' status via the exception
         raise e
     except Exception as e:
         current_app.logger.error(f"Login error for {data.get('email', 'N/A')}: {e}", exc_info=True)
-        # Let generic handler manage, audit log captures 'error'
         raise
 
 
 @auth_bp.route("/refresh", methods=["POST"])
-@jwt_required(refresh=True) # Requires a valid refresh token cookie
+@jwt_required(refresh=True)
 @audit_event("refresh_access_token")
 def refresh():
     try:
         identity = get_jwt_identity()
         if not identity:
-             # Should be caught by @jwt_required, but defensive check
              raise Unauthorized("Invalid refresh token claims.")
 
-        # AuthService generates the new token
         new_access_token = auth_service.refresh_access_token(identity)
 
         response = jsonify({"message": "Access token refreshed"})
@@ -97,64 +92,46 @@ def refresh():
         return response
 
     except Unauthorized as e:
-         raise e # Let error handler manage
+         raise e
     except Exception as e:
         current_app.logger.error(f"Token refresh error for {get_jwt_identity()}: {e}", exc_info=True)
         raise
 
 
 @auth_bp.route("/profile", methods=["GET"])
-@jwt_required() # Requires a valid access token cookie
+@jwt_required()
 @audit_event("view_profile")
 def profile():
-    # Use helper to get validated user doc and ID from JWT
     user_doc, user_id = get_current_user_doc_and_id()
 
     if not user_doc:
-        # This case implies JWT was valid but user doc couldn't be found in DB
         raise NotFound("User profile not found.")
 
-    # Return relevant, non-sensitive user information
     profile_data = {
         "id": user_id,
         "first_name": user_doc.get("first_name"),
         "last_name": user_doc.get("last_name"),
         "email": user_doc.get("email"),
         "role": user_doc.get("role"),
-        "isLead": user_doc.get("isLead", False), # Include lead status
+        "isLead": user_doc.get("isLead", False),
         "created_at": user_doc.get("created_at"),
-        # Add other fields as needed, ensure no password hash etc.
     }
     return jsonify(profile_data), 200
 
 
 @auth_bp.route("/logout", methods=["POST"])
-# No @jwt_required needed, we want to clear cookies even if token expired
-@audit_event("logout", public_ok=True) # Log the logout attempt
+@audit_event("logout", public_ok=True)
 def logout():
-    # Get identity *if available* for logging purposes, but don't require it
+
     identity = None
     try:
        verify_jwt_in_request(optional=True, locations=['cookies'])
        identity = get_jwt_identity()
     except Exception:
-        pass # Ignore errors if token is invalid/missing
+        pass
 
     response = make_response(jsonify({"message": "Logout successful"}))
-    unset_jwt_cookies(response) # Clears access and refresh cookies based on config
+    unset_jwt_cookies(response)
     current_app.logger.info(f"Logout processed for user: {identity or 'Unknown/Expired'}")
-
-    # --- Optional: Attempt to unset cookies without domain (from original code) ---
-    # This is usually not necessary if config is consistent, but can leave it
-    # current_domain = current_app.config.get("JWT_COOKIE_DOMAIN")
-    # if current_domain:
-    #      try:
-    #          current_app.config["JWT_COOKIE_DOMAIN"] = None
-    #          unset_jwt_cookies(response) # Try unsetting without domain
-    #          current_app.config["JWT_COOKIE_DOMAIN"] = current_domain # Restore config
-    #          current_app.logger.debug("Also attempted cookie unset without domain.")
-    #      except Exception as e:
-    #          current_app.logger.error(f"Error during secondary cookie unset: {e}")
-    # -----------------------------------------------------------------------------
 
     return response, 200

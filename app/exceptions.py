@@ -16,6 +16,11 @@ class NotFoundError(ServiceError):
     def __init__(self, message="Resource not found."):
         super().__init__(message, status_code=404)
 
+class DatabaseError(ServiceError): # Or inherit directly from Exception
+    """Custom exception for general database operation errors."""
+    def __init__(self, message="A database error occurred", status_code=500):
+        super().__init__(message, status_code)
+
 class AccessDeniedError(ServiceError):
     """Error when user lacks permission for an action."""
     def __init__(self, message="Access denied."):
